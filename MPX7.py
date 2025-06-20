@@ -11,7 +11,7 @@ import logging
 from typing import Dict, Set
 
 # -------------------- CONFIGURATION --------------------
-TOKEN = "7520847694:AAGXLKTvD0dHU2nyaGmCuN0DovelGHHr5Pg"
+TOKEN = "7536673463:AAHZNmpSQbPLcoq4TP_YORnYkuSmR7oxs_I"
 ADMIN_IDS = {"5524867269", "6213264970"}
 banned_users: Set[str] = set()
 user_lang: Dict[str, str] = {}
@@ -624,12 +624,110 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(get_message(admin_id, "reply_failed"))
 
 # -------------------- MAIN FUNCTION --------------------
+
+# -------------------- FILE SHARING SYSTEM --------------------
+
+# -------------------- /upload COMMAND SYSTEM --------------------
+# Stores user upload state
+admin_upload_flags = set()
+
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📤 Please send the file now.")
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    admin_upload_flags.add(user_id)
+    await update.message.reply_text("📤 Please send the file you want to upload now.")
+
+import html
+FILE_DB = "files_db.json"
+
+if not os.path.exists(FILE_DB):
+    with open(FILE_DB, "w") as f:
+        json.dump({}, f)
+
+def save_file(file_id, message_id):
+    with open(FILE_DB, "r") as f:
+        data = json.load(f)
+    data[file_id] = message_id
+    with open(FILE_DB, "w") as f:
+        json.dump(data, f)
+
+def get_file_message_id(file_id):
+    with open(FILE_DB, "r") as f:
+        data = json.load(f)
+    return data.get(file_id)
+
+# -------------------- FILE HANDLER FOR ADMINS --------------------
+
+async def handle_admin_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS or user_id not in admin_upload_flags:
+        return  # Ignore non-command-based uploads
+
+    document = update.message.document
+    if not document:
+        await update.message.reply_text("⚠️ Please send a valid file.")
+        return
+
+    file_unique_id = f"file_{document.file_unique_id}"
+    message_id = update.message.message_id
+    save_file(file_unique_id, message_id)
+    bot_username = (await context.bot.get_me()).username
+    share_link = f"https://t.me/{bot_username}?start={file_unique_id}"
+    await update.message.reply_text(
+    f"✅ File saved!\n🔗 Share this link: https://t.me/{bot_username}?start={file_unique_id}"
+)
+
+    admin_upload_flags.discard(user_id)
+(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ You are not authorized to upload files.")
+        return
+
+    document = update.message.document
+    if not document:
+        await update.message.reply_text("⚠️ Please send a valid file.")
+        return
+
+    file_unique_id = f"file_{document.file_unique_id}"
+    message_id = update.message.message_id
+    save_file(file_unique_id, message_id)
+    bot_username = (await context.bot.get_me()).username
+    share_link = f"https://t.me/{bot_username}?start={file_unique_id}"
+    await update.message.reply_text(f"✅ File saved!
+🔗 Share this link: {share_link}")
+
+# -------------------- EXTEND /start HANDLER --------------------
+async def extended_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if args and args[0].startswith("file_"):
+        file_id = args[0]
+        msg_id = get_file_message_id(file_id)
+        if msg_id:
+            await context.bot.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=update.effective_chat.id,
+                message_id=msg_id
+            )
+        else:
+            await update.message.reply_text("❌ File not found or expired.")
+    else:
+        # Fallback to original welcome
+        await update.message.reply_text("👋 Welcome! Use a valid file link to get your file.")
+
 def main() -> None:
     """Start the bot."""
     application = ApplicationBuilder().token(TOKEN).build()
 
+    application.add_handler(MessageHandler(filters.Document.ALL & filters.User(ADMIN_IDS), handle_admin_file))
+    application.add_handler(CommandHandler("start", extended_start))
+    application.add_handler(CommandHandler("upload", upload_command))
+
+
     # Command handlers
-    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("user", user_dashboard))
     application.add_handler(CommandHandler("language", change_language))
     application.add_handler(CommandHandler("help", help_command))
