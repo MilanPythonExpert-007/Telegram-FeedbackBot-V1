@@ -15,6 +15,11 @@ from telegram.ext import (
 import uuid
 import random
 import pathlib
+import platform
+import psutil
+import socket
+import time
+from lang.system_status import get_system_status
 
 # -------------------- CONFIGURATION --------------------
 TOKEN = "8008021512:AAHEtYedUgpy31iRVWy5WjxCuELuTZTWPfQ"
@@ -874,8 +879,7 @@ async def user_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     total = len(user_lang)
 
     await update.message.reply_text(
-        get_message(user_id, "user", user_id=user_id, lang=lang.capitalize(), banned=banned, total=total),
-        parse_mode="HTML"
+        get_message(user_id, "user", user_id=user_id, lang=lang.capitalize(), banned=banned, total=total)
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -893,34 +897,21 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # -------------------- HANDLERS: MESSAGES --------------------
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    user_id = str(user.id)
+    user_id = str(update.effective_user.id)
     register_user(user_id)
     if is_banned(user_id):
         await update.message.reply_text(get_message(user_id, "banned"))
         return
 
+    # Forward user message to all admins
     for admin_id in ADMIN_IDS:
-        try:
-            if update.message.text:
-                sent = await context.bot.send_message(
-                    chat_id=int(admin_id),
-                    text=(
-                        f"📩 From: {user.full_name} (@{user.username or 'NoUsername'})\n"
-                        f"🆔 ID: {user.id}\n\n"
-                        f"📝 {update.message.text}"
-                    ),
-                    parse_mode="HTML"
-                )
-            else:
-                sent = await context.bot.forward_message(
-                    chat_id=int(admin_id),
-                    from_chat_id=user.id,
-                    message_id=update.message.message_id
-                )
-            forward_map[sent.message_id] = user.id
-        except Exception as e:
-            logger.error(f"Forward Error to admin {admin_id}: {e}")
+        if str(admin_id) != user_id:
+            try:
+                await context.bot.forward_message(chat_id=admin_id, from_chat_id=update.effective_chat.id, message_id=update.message.message_id)
+            except Exception as e:
+                logger.error(f"Forward Error to admin {admin_id}: {e}")
+    # Optionally, reply to user
+    await update.message.reply_text(get_message(user_id, "welcome"))
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     admin_id = str(update.effective_user.id)
@@ -975,6 +966,10 @@ from uuid import uuid4 as _uuid4
 FILES_DB = "files.json"
 
 async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Only admins can upload files.")
+        return
     try:
         await update.message.reply_text("📤 Send me a file to upload (Max 500MB).")
         context.user_data['awaiting_upload'] = True
@@ -1057,6 +1052,9 @@ async def extended_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def myfiles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Only admins can view files.")
+        return
     if not os.path.exists(FILES_DB):
         await update.message.reply_text("You have not uploaded any files yet.")
         return
@@ -1074,6 +1072,10 @@ async def myfiles_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Your files:\n{msg}")
 
 async def randomfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Only admins can get random files.")
+        return
     if not os.path.exists(FILES_DB):
         await update.message.reply_text("No files in the database yet.")
         return
@@ -1089,6 +1091,9 @@ async def randomfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def deletefile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Only admins can delete files.")
+        return
     args = context.args
     if not args:
         await update.message.reply_text("Usage: /deletefile <file_id>")
@@ -1113,11 +1118,14 @@ async def deletefile_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 <b>SkullCheat FileBot</b>\nCreated by @SkullModOwner\nUpload, share, and manage files easily!\nEnjoy!",
-        parse_mode="HTML"
+        "🤖 SkullCheat FileBot\nCreated by @SkullModOwner\nUpload, share, and manage files easily!\nEnjoy!"
     )
 
 async def fileinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Only admins can view file info.")
+        return
     args = context.args
     if not args:
         await update.message.reply_text("Usage: /fileinfo <file_id>")
@@ -1137,54 +1145,61 @@ async def fileinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.effective_user.id)
-    # 1. Detect user language (default to 'en')
-    lang_code = get_user_language(user_id)
-    lang_file = f"lang/{lang_code[:2]}.json"
-    if not os.path.exists(lang_file):
-        lang_file = "lang/en.json"
+    logger.info(f"/commands called by user: {user_id}")
     try:
+        lang_code = get_user_language(user_id)
+        lang_map = {
+            "english": "en", "hindi": "hi", "urdu": "ur", "chinese": "zh", "french": "fr", "spanish": "es", "turkish": "tr"
+        }
+        lang_short = lang_map.get(lang_code, "en")
+        lang_file = f"lang/{lang_short}.json"
+        logger.info(f"Trying to load lang file: {lang_file}")
+        if not os.path.exists(lang_file):
+            lang_file = "lang/en.json"
         with open(lang_file, "r") as f:
             lang_data = json.load(f)
-    except Exception:
-        with open("lang/en.json", "r") as f:
-            lang_data = json.load(f)
-    # Fallback for missing keys
-    def get_cmd(key, subkey):
-        try:
-            return lang_data["commands"][key][subkey]
-        except Exception:
-            with open("lang/en.json", "r") as f:
-                en_data = json.load(f)
-            return en_data["commands"].get(key, {}).get(subkey, f"/{key}")
-    def get_section(section):
-        try:
-            return lang_data["sections"][section]
-        except Exception:
-            with open("lang/en.json", "r") as f:
-                en_data = json.load(f)
-            return en_data["sections"].get(section, section.title())
-    # 2. Command groupings
-    user_cmds = [
-        "start", "help", "about", "user", "language", "feedback", "commands"
-    ]
-    file_cmds = [
-        "upload", "myfiles", "randomfile", "deletefile", "fileinfo"
-    ]
-    admin_cmds = [
-        "ban", "unban", "broadcast", "stats", "banlist"
-    ]
-    # 3. Build message
-    msg = "<b>" + get_section("user") + "</b>\n"
-    for cmd in user_cmds:
-        msg += f"{get_cmd(cmd, 'label')} - {get_cmd(cmd, 'desc')}\n"
-    msg += "\n<b>" + get_section("file") + "</b>\n"
-    for cmd in file_cmds:
-        msg += f"{get_cmd(cmd, 'label')} - {get_cmd(cmd, 'desc')}\n"
-    if is_admin(user_id):
-        msg += "\n<b>" + get_section("admin") + "</b>\n"
-        for cmd in admin_cmds:
+        logger.info(f"Loaded lang file: {lang_file}")
+        def get_cmd(key, subkey):
+            try:
+                return lang_data["commands"][key][subkey]
+            except Exception as e:
+                logger.error(f"get_cmd error for {key}.{subkey}: {e}")
+                with open("lang/en.json", "r") as f:
+                    en_data = json.load(f)
+                return en_data["commands"].get(key, {}).get(subkey, f"/{key}")
+        def get_section(section):
+            try:
+                return lang_data["sections"][section]
+            except Exception as e:
+                logger.error(f"get_section error for {section}: {e}")
+                with open("lang/en.json", "r") as f:
+                    en_data = json.load(f)
+                return en_data["sections"].get(section, section.title())
+        user_cmds = []
+        file_cmds = []
+        admin_cmds = []
+        for key in lang_data["commands"]:
+            if key in ["ban", "unban", "broadcast", "stats", "banlist", "uptime"]:
+                admin_cmds.append(key)
+            elif key in ["upload", "myfiles", "randomfile", "deletefile", "fileinfo"]:
+                file_cmds.append(key)
+            else:
+                user_cmds.append(key)
+        msg = f"{get_section('user')}\n"
+        for cmd in user_cmds:
             msg += f"{get_cmd(cmd, 'label')} - {get_cmd(cmd, 'desc')}\n"
-    await update.message.reply_text(msg, parse_mode="HTML")
+        msg += f"\n{get_section('file')}\n"
+        for cmd in file_cmds:
+            msg += f"{get_cmd(cmd, 'label')} - {get_cmd(cmd, 'desc')}\n"
+        if is_admin(user_id):
+            msg += f"\n{get_section('admin')}\n"
+            for cmd in admin_cmds:
+                msg += f"{get_cmd(cmd, 'label')} - {get_cmd(cmd, 'desc')}\n"
+        logger.info(f"Sending command list to user {user_id}")
+        await update.message.reply_text(msg)
+    except Exception as e:
+        logger.error(f"/commands error: {e}")
+        await update.message.reply_text(f"❌ Failed to load command list. Error: {e}")
 
 # Utility to get localized command labels for keyboard
 COMMON_COMMANDS = ["commands", "help", "language", "about"]
@@ -1202,6 +1217,25 @@ def get_command_keyboard(user_id: str):
     row = [lang_data["commands"].get(cmd, {}).get("label", f"/{cmd}") for cmd in COMMON_COMMANDS]
     return ReplyKeyboardMarkup([row], resize_keyboard=True)
 
+# -------------------- ADMIN: UPTIME COMMAND --------------------
+async def uptime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text(get_message(user_id, "unauthorized"))
+        return
+    sysinfo = get_system_status()
+    msg = (
+        "<b>🖥️ VPS Status</b>\n\n"
+        f"🕐 <b>Uptime:</b> {sysinfo['uptime']}\n"
+        f"📛 <b>Hostname:</b> {sysinfo['hostname']}\n"
+        f"🧠 <b>CPU:</b> {sysinfo['cpu_model']}\n"
+        f"💾 <b>RAM:</b> {sysinfo['ram']}\n"
+        f"📦 <b>Disk:</b> {sysinfo['disk']}\n"
+        f"🌐 <b>OS:</b> {sysinfo['os_version']}\n"
+        f"📊 <b>Load Avg:</b> {sysinfo['load']}"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
 # -------------------- MAIN FUNCTION --------------------
 def main() -> None:
     application = ApplicationBuilder().token(TOKEN).build()
@@ -1218,6 +1252,11 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("feedback", feedback_command))
     application.add_handler(CommandHandler("commands", commands_command))  # Add new
+    application.add_handler(CommandHandler("myfiles", myfiles_command))
+    application.add_handler(CommandHandler("randomfile", randomfile_command))
+    application.add_handler(CommandHandler("deletefile", deletefile_command))
+    application.add_handler(CommandHandler("about", about_command))
+    application.add_handler(CommandHandler("fileinfo", fileinfo_command))
 
     # Admin commands
     application.add_handler(CommandHandler("ban", ban_user))
@@ -1225,25 +1264,17 @@ def main() -> None:
     application.add_handler(CommandHandler("broadcast", broadcast))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("banlist", banlist_command))
-
-    # Fun & utility commands
-    application.add_handler(CommandHandler("myfiles", myfiles_command))
-    application.add_handler(CommandHandler("randomfile", randomfile_command))
-    application.add_handler(CommandHandler("deletefile", deletefile_command))
-    application.add_handler(CommandHandler("about", about_command))
-    application.add_handler(CommandHandler("fileinfo", fileinfo_command))
-
-    # Callback for language selection
-    application.add_handler(CallbackQueryHandler(language_selected, pattern="^lang_"))
+    application.add_handler(CommandHandler("uptime", uptime_command))
 
     # Message handlers
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO | filters.AUDIO), handle_file_upload))
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.REPLY, handle_admin_reply))
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_user_message))
+    application.add_handler(MessageHandler(filters.Text() & ~filters.Command(), handle_user_message))
+    application.add_handler(MessageHandler(filters.REPLY, handle_admin_reply))
 
-    # Start the Bot
+    # Callback query handler (for inline buttons)
+    application.add_handler(CallbackQueryHandler(language_selected, pattern=r"^lang_"))
+
+    # Run the bot
     application.run_polling()
-    logger.info("Bot started and running...")
 
 if __name__ == "__main__":
     main()
